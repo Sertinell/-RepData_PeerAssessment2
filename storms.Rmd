@@ -1,0 +1,288 @@
+---
+title: "Most Harmful Storm Events Across the States for People and Economy"
+author: "Sertinell"
+date: "12 November 2015"
+output: html_document
+---
+# Sipnosys
+In this study we explore the impact of storm events in the life of the United
+States of America inhabitants. We explore both, the impact in health and in
+economy. To identify the most harmful events for health we compare the total
+number of fatalities and injuries caused by each kind of event. To identify the
+most harmful eventsin terms of economic impact we compare tha amount of 
+property damage and crop damage. We found that only four type events account
+for almost the 80% of the fatalities and more than 85% of the injuries.
+Simlarly, the five most harmful type of events account for more than 97% of the
+property damage and more than 84% of the crop damage.
+
+# Data Processing
+
+```{r}
+require(data.table)
+require(dplyr)
+require(ggplot2)
+require(scales)
+```
+
+### Load data
+Download the file, read it using fread through a bzcat to uncompress it
+into a *data.frame*.
+
+```{r cache=TRUE}
+filename <- "data/storms.csv.bz2"
+download.file("https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2", destfile = filename)
+stormdata <-fread(sprintf("bzcat %s | tr -d '\\000'", filename))
+```
+
+### Clean up data
+Since all the questions refer to data across the states, I have dropped out all the columns related to location.
+
+```{r}
+notwanted <- c(1,4:7,9:11,14:20, 30:37)
+stormdata <- select(stormdata, -notwanted)
+```
+
+Change the columns names to lower case and remove "\_"
+
+```{r cache=TRUE}
+names(stormdata) <- tolower(names(stormdata))
+names(stormdata) <- sub("_", "", names(stormdata))
+names(stormdata)
+```
+
+### Calculate the actual damage
+
+It seems that the *propdmgexp* and the *cropdmgexp* are the exponents of the *propdmg* and *cropdmg* respectively. We are using those colums to generate an extra column with the absolute value.
+
+```{r}
+table(stormdata$cropdmgexp)
+table(stormdata$propdmgexp)
+```
+
+Numbers are taken as exponent of scientific notation (10*x) and letters are taken as follows:
+
+* B: Billions 10^12
+* k|K : Kilo 10^3
+* M|m : Millions 10^6
+* H|h : Hecto 10^2
+
+Other values and blanks are assigned 0.
+
+```{r cache=TRUE}
+values <- data.frame(
+  letters = c("B", "k", "K", "m", "M", "H", "h"), 
+  value =   c(  12,   3,   3,  6,   6 ,   2,  2) 
+  );
+for(letter in values$letters){
+  stormdata$cropdmgexp[stormdata$cropdmgexp == letter] <-
+    values$value[values$letters == letter]
+  stormdata$propdmgexp[stormdata$propdmgexp == letter] <-
+    values$value[values$letters == letter]
+}
+
+stormdata$cropdmgexp <- as.integer(stormdata$cropdmgexp)
+stormdata$propdmgexp <- as.integer(stormdata$propdmgexp)
+stormdata$cropdmgexp[is.na(stormdata$cropdmgexp)] <- 0
+stormdata$propdmgexp[is.na(stormdata$propdmgexp)] <- 0
+
+stormdata <- mutate(stormdata, propertydamage = propdmg * 10^propdmgexp, cropdamage = cropdmg * 10^cropdmgexp )
+
+```
+
+Drop old columns
+
+```{r}
+stormdata <- select(stormdata, -c(cropdmg, propdmg, cropdmgexp, propdmgexp))
+```
+
+
+### Clean up the *evtype* column
+Extract the evtype column and inspect it to decide how to clean up this messy column. Get all the unique values and short it alphabetycally.
+
+```{r}
+evtype <- unique(stormdata$evtype)
+evtype <- evtype[order(evtype)]
+evtype <- tolower(evtype)
+evtype
+```
+
+I have decided to keep only the most common *words* and consider every evtype that contains a certain word as an event of this word type.
+
+Split all the evtype values by words to find the most common words longer than 2 characters:
+
+```{r}
+words <- unlist(strsplit(evtype,'[^a-zA-Z]', perl = TRUE))
+words <- unique(words)
+words <- words[order(words)]
+words <- words[nchar(words) > 2]
+```
+
+Count the times every type appears:
+
+```{r cache=TRUE}
+stormdata$evtype <- tolower(stormdata$evtype)
+wordtable <- lapply(words, FUN=function(x){
+              sum(grepl(x, stormdata$evtype))
+             })
+wordtable <- data.frame(word = words, count = unlist(wordtable))
+wordtable <- wordtable[order(-wordtable$count),]
+head(wordtable, 20)
+```
+
+We can see that words like *heavy*, *high* and others appear on the top of our list. Drop them because they are too vague.
+
+```{r}
+dropwords <- c("heavy", "high", "strong", "extreme", "record", "light")
+wordtable <- wordtable[-which(wordtable$word %in% dropwords),]
+```
+
+Now we need to run a loop and assign the *word* value to a new column called *cleanevent* to every event that matches each of the *words*. Every event is assigned a *cleanevent* value only once.
+
+```{r cache=TRUE}
+stormdata$cleanevent <- as.character("")
+stormdata$cleanevent <- NA
+for(event in wordtable$word)
+  {
+    stormdata$cleanevent[is.na(stormdata$cleanevent) &
+                          grepl(event, stormdata$evtype) ] <- event
+  }
+```
+
+We got *only* 85 levels and there is only 9 NA event. The NA values don't seem to be important.
+
+```{r}
+length(table(stormdata$cleanevent))
+sum(is.na(stormdata$cleanevent))
+stormdata[is.na(stormdata$cleanevent),]
+```
+
+## Which types of events are most harmful with respect to population health?
+
+To show the impact of events in population health we need to consider the columns *injuries* and *fatalities*. Short the data according to those columns. It seems the worst recorded events were tornadoes and heatwaves.
+
+```{r}
+stormdata <- arrange(stormdata, desc(fatalities),
+                     desc(injuries))
+head(stormdata)
+```
+
+Now we can summarize the data to check the totals:
+
+```{r}
+databyev <- group_by(stormdata, cleanevent)
+databyev <- summarise_each(databyev, funs(sum), fatalities, injuries)
+databyev <- arrange(databyev, desc(fatalities), desc(injuries))
+head(databyev)
+```
+
+Check the percentage of total victims per event:
+
+```{r}
+databyev <- mutate(databyev, 
+                   fatalitiespercent  = fatalities/sum(fatalities), 
+                   injuriespercent = injuries/sum(injuries) )
+databyev <- mutate(databyev, 
+                   cumsumfat  = cumsum(fatalitiespercent), 
+                   cumsuminj = cumsum(injuriespercent) )
+head(databyev, 10)
+```
+
+## Which types of events have the greatest economic consequences? 
+
+To show the impact on economy we inspect the columns *propertydanage* and *cropdamage*.
+
+```{r}
+stormdata <- arrange(stormdata, desc(propertydamage),
+                     desc(cropdamage))
+head(stormdata)
+```
+
+It seems like floods, storms and hurricanes are the most harmful events in terms of economical impact. Summarize the data to get the totals.
+
+```{r}
+databyeveco <- group_by(stormdata, cleanevent)
+databyeveco <- summarise_each(databyeveco, funs(sum), propertydamage, cropdamage)
+databyeveco <- arrange(databyeveco, desc(propertydamage), desc(cropdamage))
+head(databyeveco)
+```
+
+Check the percentage of damage for every event:
+
+```{r}
+databyeveco <- mutate(databyeveco, 
+                   propertydamagepercent  = propertydamage/sum(propertydamage),
+                   cropdamagepercent = cropdamage/sum(cropdamage) )
+databyeveco <- mutate(databyeveco, 
+                   cumsumprop  = cumsum(propertydamagepercent), 
+                   cumsumcrop = cumsum(cropdamagepercent) )
+head(databyeveco)
+```
+
+#Results 
+
+### Effects on Population Health
+
+Four events account for almost the 80% of the fatalities and more than 85% of the injuries. Those events are:
+
+1. Tornadoes
+2. Heatwaves
+3. Wind
+4. Flood
+5. Lightning
+```{r}
+head(databyev, 10)
+```
+
+
+Plot a barplot:
+
+```{r}
+temp <- head(databyev, 5)
+temp <- select(temp, cleanevent, fatalitiespercent, injuriespercent)
+temp$cleanevent <- as.factor(temp$cleanevent)
+levels(temp$cleanevent)<- c("flood", "heatwave", "lightning",
+                            "tornado", "wind")
+temp$cleanevent <- reorder(temp$cleanevent, desc(temp$fatalitiespercent), min)
+temp <- melt(temp, id.vars = "cleanevent", variable.name = "variable")
+levels(temp$variable) <- c("Fatalities", "Injuries")
+ggplot(temp, aes(x=cleanevent, y=value))+
+  geom_bar(stat = "identity") +
+  facet_grid( . ~ variable) +
+  ggtitle("Most Harmful Events for Population Health")+
+  xlab("Event Type") +
+  ylab("Percentage of total")+
+  scale_y_continuous(labels = percent) 
+```
+
+### Effects on Economy
+
+The five most harmful events account for more than 97% of the property damage and more than 84% of the crop damage. Those events are:
+
+1. Floods
+2. Hurricanes
+3. Storms
+4. Wind
+5. Tornadoes
+
+```{r}
+head(databyeveco, 10)
+```
+
+Plot a barplot:
+
+```{r}
+temp <- head(databyeveco, 5)
+temp <- select(temp, cleanevent, propertydamagepercent, cropdamagepercent)
+temp$cleanevent <- as.factor(temp$cleanevent)
+levels(temp$cleanevent)[5] <- "wind" 
+temp$cleanevent <- reorder(temp$cleanevent, desc(temp$propertydamagepercent), min)
+temp <- melt(temp, id.vars = "cleanevent", variable.name = "variable")
+levels(temp$variable) <- c("Property Damage", "Crop Damage")
+ggplot(temp, aes(x=cleanevent, y=value))+
+  geom_bar(stat = "identity") +
+  facet_grid( . ~ variable) +
+  ggtitle("Most Harmful Events for Economy")+
+  xlab("Event Type") +
+  ylab("Percentage of total")+
+  scale_y_continuous(labels = percent) 
+```
